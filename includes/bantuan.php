@@ -2220,8 +2220,290 @@ function qrg_render_pembayaran_qr_admin_panel() {
     <?php
 }
 
+/**
+ * Dapatkan versi plugin saat ini.
+ *
+ * @return string
+ */
+function qrg_get_plugin_version() {
+    if ( defined( 'QRG_VERSION' ) && QRG_VERSION ) {
+        return QRG_VERSION;
+    }
+    if ( ! function_exists( 'get_file_data' ) ) {
+        require_once ABSPATH . 'wp-admin/includes/plugin.php';
+    }
+    if ( function_exists( 'get_file_data' ) && defined( 'QRG_PLUGIN_DIR' ) ) {
+        $plugin_data = get_file_data( QRG_PLUGIN_DIR . 'index.php', array( 'Version' => 'Version' ) );
+        if ( ! empty( $plugin_data['Version'] ) ) {
+            return trim( $plugin_data['Version'] );
+        }
+    }
+    return '1.7.1';
+}
+
+/**
+ * Cek versi terbaru dari repositori GitHub serverstb/wpsekolah.
+ *
+ * @param bool $force_refresh Paksa pengecekan ulang tanpa menggunakan transient cache.
+ * @return array
+ */
+function qrg_check_github_version( $force_refresh = false ) {
+    $transient_key = 'qrg_wpsekolah_github_version';
+
+    if ( ! $force_refresh ) {
+        $cached = get_transient( $transient_key );
+        if ( is_array( $cached ) && isset( $cached['current_version'] ) ) {
+            return $cached;
+        }
+    }
+
+    $current_version = qrg_get_plugin_version();
+    $remote_version  = '';
+    $release_notes   = '';
+    $published_at    = '';
+    $repo_url        = 'https://github.com/serverstb/wpsekolah';
+    $download_url    = 'https://github.com/serverstb/wpsekolah/archive/refs/heads/main.zip';
+    $commits_url     = 'https://github.com/serverstb/wpsekolah/commits/main';
+
+    $request_args = array(
+        'timeout'    => 12,
+        'user-agent' => 'WordPress/' . get_bloginfo( 'version' ) . '; ' . home_url(),
+        'sslverify'  => false,
+    );
+
+    // 1. Cek melalui GitHub API Releases terlebih dahulu jika ada release
+    $releases_api_url = 'https://api.github.com/repos/serverstb/wpsekolah/releases/latest';
+    $response = wp_remote_get( $releases_api_url, array_merge( $request_args, array(
+        'headers' => array( 'Accept' => 'application/vnd.github.v3+json' ),
+    ) ) );
+
+    if ( ! is_wp_error( $response ) && (int) wp_remote_retrieve_response_code( $response ) === 200 ) {
+        $body = wp_remote_retrieve_body( $response );
+        $json = json_decode( $body, true );
+        if ( is_array( $json ) && ! empty( $json['tag_name'] ) ) {
+            $remote_version = ltrim( trim( $json['tag_name'] ), 'vV' );
+            if ( ! empty( $json['body'] ) ) {
+                $release_notes = trim( $json['body'] );
+            }
+            if ( ! empty( $json['published_at'] ) ) {
+                $published_at = $json['published_at'];
+            }
+            if ( ! empty( $json['zipball_url'] ) ) {
+                $download_url = $json['zipball_url'];
+            }
+        }
+    }
+
+    // 2. Fallback: Cek file index.php mentah di branch main bila releases belum dibuat
+    if ( empty( $remote_version ) ) {
+        $raw_url = 'https://raw.githubusercontent.com/serverstb/wpsekolah/main/index.php';
+        $response = wp_remote_get( $raw_url, $request_args );
+
+        // Fallback alternatif ke branch master jika main gagal
+        if ( is_wp_error( $response ) || (int) wp_remote_retrieve_response_code( $response ) !== 200 ) {
+            $raw_url = 'https://raw.githubusercontent.com/serverstb/wpsekolah/master/index.php';
+            $response = wp_remote_get( $raw_url, $request_args );
+        }
+
+        if ( ! is_wp_error( $response ) && (int) wp_remote_retrieve_response_code( $response ) === 200 ) {
+            $body = wp_remote_retrieve_body( $response );
+            if ( preg_match( '/^[ \t\/*#]*Version:\s*([0-9\.]+)/mi', $body, $matches ) ) {
+                $remote_version = trim( $matches[1] );
+            }
+        }
+    }
+
+    if ( ! empty( $remote_version ) ) {
+        $has_update = version_compare( $remote_version, $current_version, '>' );
+        $data = array(
+            'success'         => true,
+            'current_version' => $current_version,
+            'remote_version'  => $remote_version,
+            'has_update'      => (bool) $has_update,
+            'checked_at'      => current_time( 'timestamp' ),
+            'checked_time'    => current_time( 'd/m/Y H:i' ),
+            'repo_url'        => $repo_url,
+            'download_url'    => $download_url,
+            'commits_url'     => $commits_url,
+            'release_notes'   => $release_notes,
+            'published_at'    => $published_at,
+        );
+        // Simpan transient selama 6 jam
+        set_transient( $transient_key, $data, 6 * HOUR_IN_SECONDS );
+        return $data;
+    }
+
+    // Gagal membaca versi dari GitHub
+    $error_msg = is_wp_error( $response ) ? $response->get_error_message() : 'Gagal menghubungi server GitHub.';
+    $data = array(
+        'success'         => false,
+        'error'           => $error_msg,
+        'current_version' => $current_version,
+        'remote_version'  => null,
+        'has_update'      => false,
+        'checked_at'      => current_time( 'timestamp' ),
+        'checked_time'    => current_time( 'd/m/Y H:i' ),
+        'repo_url'        => $repo_url,
+        'download_url'    => $download_url,
+        'commits_url'     => $commits_url,
+    );
+    // Simpan pesan error selama 10 menit agar tidak terus-menerus membebani request
+    set_transient( $transient_key, $data, 10 * MINUTE_IN_SECONDS );
+    return $data;
+}
+
+/**
+ * Handler AJAX untuk cek pembaruan plugin.
+ */
+add_action( 'wp_ajax_qrg_check_github_update', 'qrg_ajax_check_github_update' );
+function qrg_ajax_check_github_update() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_send_json_error( array( 'message' => 'Akses ditolak.' ) );
+    }
+    check_ajax_referer( 'qrg_check_update_nonce', 'nonce' );
+
+    $info = qrg_check_github_version( true );
+    $html = qrg_render_version_status_box( $info, true );
+
+    wp_send_json_success( array(
+        'info' => $info,
+        'html' => $html,
+    ) );
+}
+
+/**
+ * Render komponen notifikasi dan status versi plugin.
+ *
+ * @param array $version_info
+ * @param bool  $return_string
+ * @return string|void
+ */
+function qrg_render_version_status_box( $version_info, $return_string = false ) {
+    if ( $return_string ) {
+        ob_start();
+    }
+    $nonce = wp_create_nonce( 'qrg_check_update_nonce' );
+    $current_version = esc_html( $version_info['current_version'] ?? '1.7.1' );
+    $remote_version  = esc_html( $version_info['remote_version'] ?? '' );
+    $has_update      = ! empty( $version_info['has_update'] );
+    $is_success      = ! empty( $version_info['success'] );
+    $repo_url        = esc_url( $version_info['repo_url'] ?? 'https://github.com/serverstb/wpsekolah' );
+    $download_url    = esc_url( $version_info['download_url'] ?? 'https://github.com/serverstb/wpsekolah/archive/refs/heads/main.zip' );
+    $commits_url     = esc_url( $version_info['commits_url'] ?? 'https://github.com/serverstb/wpsekolah/commits/main' );
+    $checked_diff    = ! empty( $version_info['checked_at'] ) ? human_time_diff( $version_info['checked_at'] ) : 'baru saja';
+    ?>
+    <div id="qrg-version-box" class="qrg-version-box <?php echo $has_update ? 'has-update' : ( $is_success ? 'is-latest' : 'has-error' ); ?>" style="max-width:760px; margin:20px 0;">
+        <?php if ( $has_update ) : ?>
+            <!-- NOTIFIKASI ADA UPDATE TERBARU -->
+            <div style="background: linear-gradient(135deg, #fffcf0 0%, #fff9e6 100%); border: 1px solid #f3d489; border-left: 5px solid #dba617; border-radius: 8px; padding: 20px 22px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                <div style="display: flex; align-items: flex-start; gap: 16px;">
+                    <div class="qrg-update-badge-icon" style="background: #fdf0cd; border-radius: 50%; width: 46px; height: 46px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; box-shadow: 0 0 0 4px rgba(219,166,23,0.2);">
+                        <span class="dashicons dashicons-update" style="font-size: 26px; width: 26px; height: 26px; color: #b8860b;"></span>
+                    </div>
+                    <div style="flex: 1; min-width: 0;">
+                        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px;">
+                            <h3 style="margin: 0; font-size: 17px; font-weight: 700; color: #724b00;">Pembaruan Plugin Tersedia!</h3>
+                            <span style="background: #d63638; color: #fff; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.5px;">Versi Baru</span>
+                        </div>
+                        <p style="margin: 0 0 14px; font-size: 14px; line-height: 1.6; color: #5a4100;">
+                            Versi terbaru <strong>v<?php echo $remote_version; ?></strong> telah dirilis di GitHub. Anda saat ini menggunakan versi <strong>v<?php echo $current_version; ?></strong>.
+                        </p>
+
+                        <!-- Action Buttons -->
+                        <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px;">
+                            <a href="<?php echo $download_url; ?>" class="button button-primary" style="display: inline-flex; align-items: center; gap: 6px; font-weight: 600; padding: 4px 14px; height: auto;">
+                                <span class="dashicons dashicons-download" style="font-size: 18px; width: 18px; height: 18px;"></span> Unduh ZIP Terbaru
+                            </a>
+                            <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer" class="button button-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; height: auto;">
+                                <span class="dashicons dashicons-external" style="font-size: 18px; width: 18px; height: 18px;"></span> Buka GitHub
+                            </a>
+                            <a href="<?php echo $commits_url; ?>" target="_blank" rel="noopener noreferrer" class="button" style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; height: auto;">
+                                <span class="dashicons dashicons-list-view" style="font-size: 18px; width: 18px; height: 18px;"></span> Riwayat Commits
+                            </a>
+                            <button type="button" class="button qrg-refresh-update-btn" data-nonce="<?php echo esc_attr( $nonce ); ?>" style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; height: auto;">
+                                <span class="dashicons dashicons-update" style="font-size: 18px; width: 18px; height: 18px;"></span> Periksa Ulang
+                            </button>
+                        </div>
+
+                        <!-- Panduan Cara Update -->
+                        <details style="margin-top: 14px; padding-top: 12px; border-top: 1px dashed #e4c885; font-size: 13px; color: #5a4100;">
+                            <summary style="cursor: pointer; font-weight: 600; color: #724b00; outline: none; user-select: none;">
+                                <span class="dashicons dashicons-info-outline" style="vertical-align: text-bottom; margin-right: 4px;"></span>
+                                Petunjuk cara memperbarui plugin
+                            </summary>
+                            <ol style="margin: 8px 0 0 20px; padding: 0; line-height: 1.7;">
+                                <li>Klik tombol <strong>Unduh ZIP Terbaru</strong> untuk mengunduh arsip kode plugin.</li>
+                                <li>Buka menu <strong>Plugins &gt; Add New &gt; Upload Plugin</strong> di admin WordPress.</li>
+                                <li>Pilih file ZIP yang telah diunduh, klik <strong>Install Now</strong>, lalu konfirmasi <strong>Replace current with uploaded</strong> (Timpa plugin).</li>
+                                <li>Atau jika server menggunakan Git, buka terminal dan jalankan <code>git pull origin main</code> di folder <code>wp-content/plugins/sekolah</code>.</li>
+                            </ol>
+                        </details>
+                    </div>
+                </div>
+            </div>
+
+        <?php elseif ( $is_success ) : ?>
+            <!-- STATUS SUDAH TERBARU -->
+            <div style="background: #f8fafc; border: 1px solid #d2dce5; border-left: 5px solid #00a32a; border-radius: 8px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <div style="background: #e7f7ed; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+                        <span class="dashicons dashicons-yes-alt" style="font-size: 22px; width: 22px; height: 22px; color: #00a32a;"></span>
+                    </div>
+                    <div>
+                        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                            <span style="font-weight: 700; font-size: 14px; color: #1d2327;">Versi Plugin: v<?php echo $current_version; ?></span>
+                            <span style="background: #e7f7ed; color: #008a20; border: 1px solid #b7ebc7; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 12px;">Terbaru</span>
+                        </div>
+                        <div style="font-size: 12px; color: #646970; margin-top: 3px;">
+                            Plugin Sekolah Anda sudah sesuai dengan versi terbaru di <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer">GitHub</a>.
+                            <span style="color: #8c8f94; margin-left: 4px;">(Terakhir dicek: <?php echo esc_html( $checked_diff ); ?> yang lalu)</span>
+                        </div>
+                    </div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer" class="button button-small" style="display: inline-flex; align-items: center; gap: 4px;">
+                        <span class="dashicons dashicons-external" style="font-size: 14px; width: 14px; height: 14px;"></span> GitHub
+                    </a>
+                    <button type="button" class="button button-small qrg-refresh-update-btn" data-nonce="<?php echo esc_attr( $nonce ); ?>" style="display: inline-flex; align-items: center; gap: 4px;">
+                        <span class="dashicons dashicons-update" style="font-size: 14px; width: 14px; height: 14px;"></span> Cek Pembaruan
+                    </button>
+                </div>
+            </div>
+
+        <?php else : ?>
+            <!-- GAGAL MENGHUBUNGI GITHUB -->
+            <div style="background: #fff; border: 1px solid #e2e4e7; border-left: 5px solid #d63638; border-radius: 8px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+                <div style="display: flex; align-items: center; gap: 12px;">
+                    <span class="dashicons dashicons-warning" style="font-size: 24px; width: 24px; height: 24px; color: #d63638;"></span>
+                    <div>
+                        <div style="font-weight: 600; font-size: 13px; color: #1d2327;">Versi Plugin: v<?php echo $current_version; ?></div>
+                        <div style="font-size: 12px; color: #646970; margin-top: 2px;">
+                            Tidak dapat memeriksa versi terbaru di <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer">GitHub</a>. <?php echo esc_html( $version_info['error'] ?? '' ); ?>
+                        </div>
+                    </div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                    <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer" class="button button-small">Buka GitHub</a>
+                    <button type="button" class="button button-small qrg-refresh-update-btn" data-nonce="<?php echo esc_attr( $nonce ); ?>">Coba Lagi</button>
+                </div>
+            </div>
+        <?php endif; ?>
+    </div>
+    <?php
+    if ( $return_string ) {
+        return ob_get_clean();
+    }
+}
+
 function qrg_bantuan_page_callback() {
-    $shortcodes = qrg_bantuan_shortcodes();
+    // Cek manual refresh via URL
+    $force_refresh = false;
+    if ( isset( $_GET['qrg_check_update'] ) && check_admin_referer( 'qrg_check_update_action', 'qrg_check_update_nonce' ) ) {
+        $force_refresh = true;
+    }
+
+    $version_info = qrg_check_github_version( $force_refresh );
+    $shortcodes   = qrg_bantuan_shortcodes();
     ?>
     <div class="wrap">
         <h1><span class="dashicons dashicons-editor-help" style="font-size:30px; width:30px; height:30px; margin-right:6px; vertical-align:middle;"></span>Bantuan &amp; Dokumentasi</h1>
@@ -2229,6 +2511,8 @@ function qrg_bantuan_page_callback() {
             Halaman ini berisi panduan penggunaan plugin <strong>Sekolah</strong>, terutama daftar <em>shortcode</em>
             yang dapat Anda tempelkan ke halaman atau postingan WordPress untuk menampilkan formulir dan data ke publik.
         </p>
+
+        <?php qrg_render_version_status_box( $version_info ); ?>
 
         <div class="qrg-bantuan-intro" style="background:#fff; border:1px solid #dcdcde; border-left:4px solid #2271b1; padding:16px 20px; border-radius:4px; max-width:760px; margin:20px 0;">
             <h2 style="margin-top:0;">Apa itu Shortcode?</h2>
@@ -2280,6 +2564,23 @@ function qrg_bantuan_page_callback() {
         </div>
     </div>
 
+    <style>
+    @keyframes qrgSpin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+    .qrg-spinning {
+        animation: qrgSpin 0.8s infinite linear !important;
+        display: inline-block;
+    }
+    @keyframes qrgPulseGlow {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(219, 166, 23, 0.4); }
+        50% { box-shadow: 0 0 0 6px rgba(219, 166, 23, 0); }
+    }
+    .qrg-version-box.has-update .qrg-update-badge-icon {
+        animation: qrgPulseGlow 2s infinite ease-in-out;
+    }
+    </style>
     <script>
     jQuery(function($) {
         $('.qrg-copy-shortcode').on('click', function() {
@@ -2298,6 +2599,40 @@ function qrg_bantuan_page_callback() {
                 $tmp.remove();
                 done();
             }
+        });
+
+        // AJAX refresh versi update
+        $(document).on('click', '.qrg-refresh-update-btn', function(e) {
+            e.preventDefault();
+            var $btn = $(this);
+            if ($btn.prop('disabled')) return;
+
+            var nonce = $btn.data('nonce');
+            var $icon = $btn.find('.dashicons-update');
+            $btn.prop('disabled', true);
+            $icon.addClass('qrg-spinning');
+
+            $.ajax({
+                url: ajaxurl,
+                type: 'POST',
+                data: {
+                    action: 'qrg_check_github_update',
+                    nonce: nonce
+                },
+                timeout: 25000,
+                success: function(response) {
+                    if (response && response.success && response.data && response.data.html) {
+                        $('#qrg-version-box').replaceWith(response.data.html);
+                    } else {
+                        window.location.reload();
+                    }
+                },
+                error: function() {
+                    alert('Gagal memeriksa pembaruan ke GitHub. Silakan coba kembali.');
+                    $btn.prop('disabled', false);
+                    $icon.removeClass('qrg-spinning');
+                }
+            });
         });
     });
     </script>

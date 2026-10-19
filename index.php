@@ -14,6 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 // Definisikan Path konstanta menggunakan file index.php saat ini
 define( 'QRG_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'QRG_PLUGIN_BASENAME', plugin_basename( __FILE__ ) );
+define( 'QRG_VERSION', '1.7.1' );
 
 // Load semua file modular menu dari folder includes
 require_once QRG_PLUGIN_DIR . 'includes/security.php';

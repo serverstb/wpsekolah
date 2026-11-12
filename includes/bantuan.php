@@ -2686,6 +2686,51 @@ function qrg_ajax_check_github_update() {
 }
 
 /**
+ * Salin file direktori secara rekursif dengan aman tanpa gagal karena pembatasan chmod antar-user.
+ *
+ * @param string $src
+ * @param string $dst
+ * @return bool
+ */
+function qrg_recursive_file_copy( $src, $dst ) {
+    if ( ! is_dir( $src ) ) {
+        return false;
+    }
+    $dir = @opendir( $src );
+    if ( ! $dir ) {
+        return false;
+    }
+    if ( ! is_dir( $dst ) ) {
+        @mkdir( $dst, 0777, true );
+    }
+    $success = true;
+    while ( ( $file = readdir( $dir ) ) !== false ) {
+        if ( $file === '.' || $file === '..' || $file === '.git' ) {
+            continue;
+        }
+        $src_path = rtrim( $src, '/\\' ) . '/' . $file;
+        $dst_path = rtrim( $dst, '/\\' ) . '/' . $file;
+        if ( is_dir( $src_path ) ) {
+            if ( ! qrg_recursive_file_copy( $src_path, $dst_path ) ) {
+                $success = false;
+            }
+        } else {
+            $content = @file_get_contents( $src_path );
+            if ( $content !== false ) {
+                $written = @file_put_contents( $dst_path, $content );
+                if ( $written === false ) {
+                    $success = false;
+                }
+            } else {
+                $success = false;
+            }
+        }
+    }
+    closedir( $dir );
+    return $success;
+}
+
+/**
  * Handler AJAX untuk memasang pembaruan plugin langsung dari GitHub.
  */
 add_action( 'wp_ajax_qrg_apply_github_update', 'qrg_ajax_apply_github_update' );
@@ -2702,17 +2747,27 @@ function qrg_ajax_apply_github_update() {
     $update_success = false;
     $log_output     = '';
 
+    // Ambil info commit terbaru dari GitHub API
+    $latest_commit = qrg_get_latest_github_commit( true );
+    $remote_sha    = $latest_commit['sha'] ?? '';
+
     // Metode 1: Jika merupakan repositori Git lokal (serverstb.com)
     if ( $is_git_repo ) {
+        $home_dir = is_dir( '/home/serverstb' ) ? '/home/serverstb' : ( getenv( 'HOME' ) ?: '/tmp' );
         @shell_exec( "git config --global --add safe.directory " . escapeshellarg( $plugin_dir ) . " 2>&1" );
         @shell_exec( "git config --global --add safe.directory '*' 2>&1" );
-        $git_bin = 'git -c safe.directory=' . escapeshellarg( $plugin_dir ) . ' -c safe.directory=\'*\'';
 
-        $pull_cmd = "cd {$safe_dir} && {$git_bin} fetch origin main 2>&1 && {$git_bin} reset --hard origin/main 2>&1";
+        $git_bin = 'git -c safe.directory=' . escapeshellarg( $plugin_dir ) . ' -c safe.directory=\'*\'';
+        $env_cmd = "export HOME=" . escapeshellarg( $home_dir ) . " && export PATH=/usr/local/bin:/usr/bin:/bin:\$PATH && cd {$safe_dir}";
+
+        $pull_cmd = "{$env_cmd} && {$git_bin} fetch origin main 2>&1 && {$git_bin} reset --hard origin/main 2>&1";
         $pull_out = shell_exec( $pull_cmd );
         $log_output = (string) $pull_out;
 
-        if ( strpos( $log_output, 'HEAD is now at' ) !== false || strpos( $log_output, 'Already up to date' ) !== false || ( strpos( $log_output, 'fatal:' ) === false && strpos( $log_output, 'error:' ) === false ) ) {
+        $current_head = trim( (string) shell_exec( "{$env_cmd} && {$git_bin} rev-parse HEAD 2>/dev/null" ) );
+        if ( ( ! empty( $remote_sha ) && ! empty( $current_head ) && strtolower( $current_head ) === strtolower( $remote_sha ) )
+            || strpos( $log_output, 'HEAD is now at' ) !== false
+            || strpos( $log_output, 'Already up to date' ) !== false ) {
             $update_success = true;
         }
     }
@@ -2720,8 +2775,6 @@ function qrg_ajax_apply_github_update() {
     // Metode 2: Fallback unduh arsip ZIP jika bukan git atau git reset gagal
     if ( ! $update_success ) {
         require_once ABSPATH . 'wp-admin/includes/file.php';
-        WP_Filesystem();
-        global $wp_filesystem;
 
         $zip_url  = 'https://github.com/serverstb/wpsekolah/archive/refs/heads/main.zip';
         $temp_zip = download_url( $zip_url, 60 );
@@ -2756,17 +2809,21 @@ function qrg_ajax_apply_github_update() {
         }
 
         if ( is_dir( $source_dir ) ) {
-            $copied = copy_dir( $source_dir, $plugin_dir );
-            $wp_filesystem->delete( $temp_extract_dir, true );
-            if ( ! is_wp_error( $copied ) ) {
+            // Salin file menggunakan recursive copy aman berbasis file stream
+            @shell_exec( "cp -rf " . escapeshellarg( $source_dir ) . "/* " . escapeshellarg( $plugin_dir ) . "/ 2>&1" );
+            $copy_ok = qrg_recursive_file_copy( $source_dir, $plugin_dir );
+            @shell_exec( "rm -rf " . escapeshellarg( $temp_extract_dir ) );
+
+            if ( $copy_ok ) {
                 $update_success = true;
             } else {
                 wp_send_json_error( array(
-                    'message' => 'Gagal menyalin file pembaruan: ' . $copied->get_error_message(),
+                    'message' => 'Gagal menyalin file pembaruan ke folder plugin.',
+                    'log'     => $log_output,
                 ) );
             }
         } else {
-            $wp_filesystem->delete( $temp_extract_dir, true );
+            @shell_exec( "rm -rf " . escapeshellarg( $temp_extract_dir ) );
             wp_send_json_error( array( 'message' => 'Format arsip ZIP tidak sesuai.' ) );
         }
     }

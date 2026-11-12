@@ -2532,6 +2532,23 @@ function qrg_check_github_version( $force_refresh = false ) {
 }
 
 /**
+ * Cek apakah admin sedang mengakses dari domain serverstb.com.
+ *
+ * @return bool
+ */
+function qrg_is_serverstb_host() {
+    $host = $_SERVER['HTTP_HOST'] ?? ( $_SERVER['SERVER_NAME'] ?? '' );
+    if ( ! empty( $host ) && strpos( strtolower( $host ), 'serverstb.com' ) !== false ) {
+        return true;
+    }
+    $site_host = parse_url( home_url(), PHP_URL_HOST );
+    if ( $site_host && strpos( strtolower( $site_host ), 'serverstb.com' ) !== false ) {
+        return true;
+    }
+    return false;
+}
+
+/**
  * Handler AJAX untuk cek pembaruan plugin.
  */
 add_action( 'wp_ajax_qrg_check_github_update', 'qrg_ajax_check_github_update' );
@@ -2551,6 +2568,70 @@ function qrg_ajax_check_github_update() {
 }
 
 /**
+ * Handler AJAX untuk push perubahan lokal ke repositori GitHub.
+ * Hanya dapat dijalankan oleh admin dan jika diakses dari domain serverstb.com.
+ */
+add_action( 'wp_ajax_qrg_git_push_to_github', 'qrg_ajax_git_push_to_github' );
+function qrg_ajax_git_push_to_github() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_send_json_error( array( 'message' => 'Akses ditolak.' ) );
+    }
+    check_ajax_referer( 'qrg_git_push_nonce', 'nonce' );
+
+    if ( ! qrg_is_serverstb_host() ) {
+        wp_send_json_error( array( 'message' => 'Aksi push hanya diizinkan dari serverstb.com.' ) );
+    }
+
+    $plugin_dir = defined( 'QRG_PLUGIN_DIR' ) ? QRG_PLUGIN_DIR : dirname( __DIR__ );
+    $safe_dir   = escapeshellarg( $plugin_dir );
+
+    // 1. Cek status git lokal
+    $status_out = shell_exec( "cd {$safe_dir} && git status --porcelain 2>&1" );
+    $has_changes = ! empty( trim( (string) $status_out ) );
+
+    if ( $has_changes ) {
+        $custom_msg = isset( $_POST['commit_message'] ) ? sanitize_text_field( wp_unslash( $_POST['commit_message'] ) ) : '';
+        if ( empty( $custom_msg ) ) {
+            $custom_msg = 'Pembaruan dari serverstb.com (' . current_time( 'd/m/Y H:i' ) . ' WIB)';
+        }
+        $escaped_msg = escapeshellarg( $custom_msg );
+
+        // Add & Commit
+        $commit_cmd = "cd {$safe_dir} && git add -A && git commit -m {$escaped_msg} 2>&1";
+        shell_exec( $commit_cmd );
+    }
+
+    // 2. Lakukan Git Push
+    $push_cmd = "cd {$safe_dir} && git push origin main 2>&1";
+    $push_out = shell_exec( $push_cmd );
+
+    // Hapus transient agar membaca data commit terbaru
+    delete_transient( 'qrg_wpsekolah_github_version' );
+    delete_transient( 'qrg_wpsekolah_github_latest_commit' );
+
+    $info = qrg_check_github_version( true );
+    $html = qrg_render_version_status_box( $info, true );
+
+    $is_success = ( strpos( (string) $push_out, 'Everything up-to-date' ) !== false ) || ( strpos( (string) $push_out, '-> main' ) !== false );
+
+    if ( $is_success || empty( $push_out ) ) {
+        $message = $has_changes ? 'Berhasil melakukan commit dan push ke GitHub!' : 'Repositori sudah sesuai di GitHub (tidak ada perubahan baru yang perlu di-push).';
+        wp_send_json_success( array(
+            'message' => $message,
+            'log'     => $push_out,
+            'html'    => $html,
+            'info'    => $info,
+        ) );
+    } else {
+        wp_send_json_error( array(
+            'message' => 'Push ke GitHub gagal: ' . $push_out,
+            'log'     => $push_out,
+            'html'    => $html,
+        ) );
+    }
+}
+
+/**
  * Render komponen notifikasi dan status versi plugin.
  *
  * @param array $version_info
@@ -2562,6 +2643,8 @@ function qrg_render_version_status_box( $version_info, $return_string = false ) 
         ob_start();
     }
     $nonce = wp_create_nonce( 'qrg_check_update_nonce' );
+    $push_nonce = wp_create_nonce( 'qrg_git_push_nonce' );
+    $is_serverstb = qrg_is_serverstb_host();
     $current_version = esc_html( $version_info['current_version'] ?? '1.7.1' );
     $remote_version  = esc_html( $version_info['remote_version'] ?? '' );
     $has_update      = ! empty( $version_info['has_update'] );
@@ -2603,6 +2686,11 @@ function qrg_render_version_status_box( $version_info, $return_string = false ) 
                             <button type="button" class="button qrg-refresh-update-btn" data-nonce="<?php echo esc_attr( $nonce ); ?>" style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; height: auto;">
                                 <span class="dashicons dashicons-update" style="font-size: 18px; width: 18px; height: 18px;"></span> Periksa Ulang
                             </button>
+                            <?php if ( $is_serverstb ) : ?>
+                                <button type="button" class="button button-primary qrg-git-push-btn" data-nonce="<?php echo esc_attr( $push_nonce ); ?>" style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; height: auto; background: #2271b1; border-color: #2271b1;">
+                                    <span class="dashicons dashicons-upload" style="font-size: 18px; width: 18px; height: 18px;"></span> Push ke GitHub
+                                </button>
+                            <?php endif; ?>
                         </div>
 
                         <!-- Commit Terakhir -->
@@ -2644,13 +2732,18 @@ function qrg_render_version_status_box( $version_info, $return_string = false ) 
                             </div>
                         </div>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 8px;">
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                         <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer" class="button button-small" style="display: inline-flex; align-items: center; gap: 4px;">
                             <span class="dashicons dashicons-external" style="font-size: 14px; width: 14px; height: 14px;"></span> GitHub
                         </a>
                         <button type="button" class="button button-small qrg-refresh-update-btn" data-nonce="<?php echo esc_attr( $nonce ); ?>" style="display: inline-flex; align-items: center; gap: 4px;">
                             <span class="dashicons dashicons-update" style="font-size: 14px; width: 14px; height: 14px;"></span> Cek Pembaruan
                         </button>
+                        <?php if ( $is_serverstb ) : ?>
+                            <button type="button" class="button button-small button-primary qrg-git-push-btn" data-nonce="<?php echo esc_attr( $push_nonce ); ?>" style="display: inline-flex; align-items: center; gap: 4px; background: #2271b1; border-color: #2271b1;">
+                                <span class="dashicons dashicons-upload" style="font-size: 14px; width: 14px; height: 14px;"></span> Push ke GitHub
+                            </button>
+                        <?php endif; ?>
                     </div>
                 </div>
 
@@ -2670,9 +2763,14 @@ function qrg_render_version_status_box( $version_info, $return_string = false ) 
                             </div>
                         </div>
                     </div>
-                    <div style="display: flex; align-items: center; gap: 8px;">
+                    <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
                         <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer" class="button button-small">Buka GitHub</a>
                         <button type="button" class="button button-small qrg-refresh-update-btn" data-nonce="<?php echo esc_attr( $nonce ); ?>">Coba Lagi</button>
+                        <?php if ( $is_serverstb ) : ?>
+                            <button type="button" class="button button-small button-primary qrg-git-push-btn" data-nonce="<?php echo esc_attr( $push_nonce ); ?>" style="display: inline-flex; align-items: center; gap: 4px; background: #2271b1; border-color: #2271b1;">
+                                <span class="dashicons dashicons-upload" style="font-size: 14px; width: 14px; height: 14px;"></span> Push ke GitHub
+                            </button>
+                        <?php endif; ?>
                     </div>
                 </div>
 
@@ -2822,6 +2920,51 @@ function qrg_bantuan_page_callback() {
                     alert('Gagal memeriksa pembaruan ke GitHub. Silakan coba kembali.');
                     $btn.prop('disabled', false);
                     $icon.removeClass('qrg-spinning');
+                }
+            });
+        });
+
+        // AJAX Push ke GitHub (khusus akses dari serverstb.com)
+        $(document).on('click', '.qrg-git-push-btn', function(e) {
+            e.preventDefault();
+            var $btn = $(this);
+            if ($btn.prop('disabled')) return;
+
+            var commitMsg = prompt('Masukkan pesan commit (atau klik OK untuk menggunakan pesan otomatis):', '');
+            if (commitMsg === null) {
+                return; // Dibatalkan oleh user
+            }
+
+            var nonce = $btn.data('nonce');
+            var originalHtml = $btn.html();
+            $btn.prop('disabled', true).html('<span class="dashicons dashicons-update qrg-spinning" style="font-size:14px; width:14px; height:14px;"></span> Mem-push...');
+
+            $.ajax({
+                url: ajaxurl,
+                type: 'POST',
+                data: {
+                    action: 'qrg_git_push_to_github',
+                    nonce: nonce,
+                    commit_message: commitMsg
+                },
+                timeout: 60000,
+                success: function(response) {
+                    if (response && response.success) {
+                        alert(response.data && response.data.message ? response.data.message : 'Berhasil push ke GitHub!');
+                        if (response.data && response.data.html) {
+                            $('#qrg-version-box').replaceWith(response.data.html);
+                        } else {
+                            window.location.reload();
+                        }
+                    } else {
+                        var err = (response && response.data && response.data.message) ? response.data.message : 'Gagal melakukan push ke GitHub.';
+                        alert(err);
+                        $btn.prop('disabled', false).html(originalHtml);
+                    }
+                },
+                error: function(xhr, status, error) {
+                    alert('Terjadi kesalahan jaringan atau timeout saat mem-push ke GitHub.');
+                    $btn.prop('disabled', false).html(originalHtml);
                 }
             });
         });

@@ -2242,6 +2242,181 @@ function qrg_get_plugin_version() {
 }
 
 /**
+ * Mengambil commit terakhir dari repositori GitHub serverstb/wpsekolah.
+ *
+ * @param bool $force_refresh Paksa pengecekan ulang tanpa menggunakan transient cache.
+ * @return array|false Data commit terakhir atau false jika gagal.
+ */
+function qrg_get_latest_github_commit( $force_refresh = false ) {
+    $transient_key = 'qrg_wpsekolah_github_latest_commit';
+
+    if ( ! $force_refresh ) {
+        $cached = get_transient( $transient_key );
+        if ( is_array( $cached ) && ! empty( $cached['sha'] ) ) {
+            return $cached;
+        }
+    }
+
+    $owner = 'serverstb';
+    $repo  = 'wpsekolah';
+    $url   = "https://api.github.com/repos/{$owner}/{$repo}/commits?per_page=1";
+
+    $response = false;
+
+    // 1. Coba menggunakan stream_context_create dan file_get_contents sesuai spesifikasi
+    if ( ini_get( 'allow_url_fopen' ) ) {
+        $options = array(
+            'http' => array(
+                'header'  => "User-Agent: PHP-GitHub-Monitor\r\n",
+                'timeout' => 12,
+            ),
+            'ssl'  => array(
+                'verify_peer'      => false,
+                'verify_peer_name' => false,
+            ),
+        );
+        $context  = stream_context_create( $options );
+        $response = @file_get_contents( $url, false, $context );
+    }
+
+    // 2. Fallback wp_remote_get jika file_get_contents gagal atau dinonaktifkan
+    if ( $response === false && function_exists( 'wp_remote_get' ) ) {
+        $wp_res = wp_remote_get( $url, array(
+            'timeout'    => 12,
+            'user-agent' => 'PHP-GitHub-Monitor',
+            'sslverify'  => false,
+            'headers'    => array(
+                'Accept' => 'application/vnd.github.v3+json',
+            ),
+        ) );
+        if ( ! is_wp_error( $wp_res ) && (int) wp_remote_retrieve_response_code( $wp_res ) === 200 ) {
+            $response = wp_remote_retrieve_body( $wp_res );
+        }
+    }
+
+    if ( $response === false ) {
+        return false;
+    }
+
+    $data = json_decode( $response, true );
+    if ( empty( $data ) || ! is_array( $data ) || ! isset( $data[0] ) ) {
+        return false;
+    }
+
+    $latestCommit = $data[0];
+    $latestCommit['message'] = $latestCommit['commit']['message'] ?? '';
+    $latestCommit['date']    = $latestCommit['commit']['author']['date'] ?? '';
+
+    // Simpan cache selama 6 jam
+    set_transient( $transient_key, $latestCommit, 6 * HOUR_IN_SECONDS );
+
+    return $latestCommit;
+}
+
+/**
+ * Format tanggal dari string ISO GitHub menjadi format Indonesia yang rapi.
+ *
+ * @param string $date_str Contoh: '2026-10-19T07:23:30Z'
+ * @return string
+ */
+function qrg_format_github_date( $date_str ) {
+    if ( empty( $date_str ) ) {
+        return '—';
+    }
+    $ts = strtotime( $date_str );
+    if ( ! $ts ) {
+        return esc_html( $date_str );
+    }
+
+    $tz = wp_timezone();
+    $tz_name = $tz ? $tz->getName() : '';
+    $tz_label = 'WIB';
+
+    if ( $tz_name === 'UTC' || $tz_name === '+00:00' || empty( $tz_name ) ) {
+        $tz = new DateTimeZone( 'Asia/Jakarta' );
+        $tz_label = 'WIB';
+    } elseif ( $tz_name === 'Asia/Jakarta' ) {
+        $tz_label = 'WIB';
+    } elseif ( $tz_name === 'Asia/Makassar' ) {
+        $tz_label = 'WITA';
+    } elseif ( $tz_name === 'Asia/Jayapura' ) {
+        $tz_label = 'WIT';
+    } else {
+        $tz_label = $tz_name;
+    }
+
+    try {
+        $dt = new DateTime( '@' . $ts );
+        $dt->setTimezone( $tz );
+    } catch ( Exception $e ) {
+        return esc_html( $date_str );
+    }
+
+    $bulan_indo = array(
+        1 => 'Januari', 2 => 'Februari', 3 => 'Maret', 4 => 'April',
+        5 => 'Mei', 6 => 'Juni', 7 => 'Juli', 8 => 'Agustus',
+        9 => 'September', 10 => 'Oktober', 11 => 'November', 12 => 'Desember'
+    );
+
+    $d = (int) $dt->format( 'j' );
+    $m = $bulan_indo[ (int) $dt->format( 'n' ) ] ?? $dt->format( 'F' );
+    $y = $dt->format( 'Y' );
+    $time = $dt->format( 'H:i' );
+
+    $formatted = sprintf( '%d %s %s, %s %s', $d, $m, $y, $time, $tz_label );
+
+    $diff = abs( time() - $ts );
+    if ( $diff < 60 ) {
+        $relative = 'baru saja';
+    } elseif ( $diff < 3600 ) {
+        $relative = max( 1, (int) round( $diff / 60 ) ) . ' menit yang lalu';
+    } elseif ( $diff < 86400 ) {
+        $relative = max( 1, (int) round( $diff / 3600 ) ) . ' jam yang lalu';
+    } elseif ( $diff < 86400 * 14 ) {
+        $relative = max( 1, (int) round( $diff / 86400 ) ) . ' hari yang lalu';
+    } elseif ( $diff < 86400 * 30 ) {
+        $relative = max( 1, (int) round( $diff / ( 86400 * 7 ) ) ) . ' minggu yang lalu';
+    } elseif ( $diff < 86400 * 365 ) {
+        $relative = max( 1, (int) round( $diff / ( 86400 * 30 ) ) ) . ' bulan yang lalu';
+    } else {
+        $relative = max( 1, (int) round( $diff / ( 86400 * 365 ) ) ) . ' tahun yang lalu';
+    }
+
+    return sprintf(
+        '%s <span style="color:#646970; font-size:12px;">(%s)</span>',
+        esc_html( $formatted ),
+        esc_html( $relative )
+    );
+}
+
+/**
+ * Render baris informasi commit terakhir dari GitHub.
+ *
+ * @param array|false $latest_commit
+ */
+function qrg_render_commit_info_block( $latest_commit ) {
+    if ( ! empty( $latest_commit ) && is_array( $latest_commit ) ) : ?>
+        <div class="qrg-version-commit-details" style="width: 100%; margin-top: 14px; padding-top: 12px; border-top: 1px dashed #c3c4c7; font-size: 13px; line-height: 1.8; color: #2c3338;">
+            <?php
+            $commit_msg = $latest_commit['commit']['message'] ?? ( $latest_commit['message'] ?? '' );
+            $commit_date = $latest_commit['commit']['author']['date'] ?? ( $latest_commit['date'] ?? '' );
+            $commit_sha = $latest_commit['sha'] ?? '';
+            $commit_url = $latest_commit['html_url'] ?? '';
+
+            echo '<strong>Commit Terakhir:</strong> ' . esc_html( $commit_msg ) . '<br>';
+            echo '<strong>Tanggal:</strong> ' . qrg_format_github_date( $commit_date ) . '<br>';
+            echo '<strong>Hash:</strong> <code>' . esc_html( $commit_sha ) . '</code><br>';
+            echo '<strong>URL:</strong> <a href="' . esc_url( $commit_url ) . '" target="_blank" rel="noopener noreferrer" style="word-break: break-all;">' . esc_html( $commit_url ) . '</a>';
+            ?>
+        </div>
+    <?php elseif ( $latest_commit === false ) : ?>
+        <div class="qrg-version-commit-details" style="width: 100%; margin-top: 12px; padding-top: 10px; border-top: 1px dashed #c3c4c7; font-size: 12px; color: #d63638;">
+            Gagal mengambil data GitHub
+        </div>
+    <?php endif;
+}
+
+/**
  * Cek versi terbaru dari repositori GitHub serverstb/wpsekolah.
  *
  * @param bool $force_refresh Paksa pengecekan ulang tanpa menggunakan transient cache.
@@ -2313,6 +2488,8 @@ function qrg_check_github_version( $force_refresh = false ) {
         }
     }
 
+    $latest_commit = qrg_get_latest_github_commit( $force_refresh );
+
     if ( ! empty( $remote_version ) ) {
         $has_update = version_compare( $remote_version, $current_version, '>' );
         $data = array(
@@ -2327,6 +2504,7 @@ function qrg_check_github_version( $force_refresh = false ) {
             'commits_url'     => $commits_url,
             'release_notes'   => $release_notes,
             'published_at'    => $published_at,
+            'latest_commit'   => $latest_commit,
         );
         // Simpan transient selama 6 jam
         set_transient( $transient_key, $data, 6 * HOUR_IN_SECONDS );
@@ -2346,6 +2524,7 @@ function qrg_check_github_version( $force_refresh = false ) {
         'repo_url'        => $repo_url,
         'download_url'    => $download_url,
         'commits_url'     => $commits_url,
+        'latest_commit'   => $latest_commit,
     );
     // Simpan pesan error selama 10 menit agar tidak terus-menerus membebani request
     set_transient( $transient_key, $data, 10 * MINUTE_IN_SECONDS );
@@ -2391,6 +2570,7 @@ function qrg_render_version_status_box( $version_info, $return_string = false ) 
     $download_url    = esc_url( $version_info['download_url'] ?? 'https://github.com/serverstb/wpsekolah/archive/refs/heads/main.zip' );
     $commits_url     = esc_url( $version_info['commits_url'] ?? 'https://github.com/serverstb/wpsekolah/commits/main' );
     $checked_diff    = ! empty( $version_info['checked_at'] ) ? human_time_diff( $version_info['checked_at'] ) : 'baru saja';
+    $latest_commit   = isset( $version_info['latest_commit'] ) ? $version_info['latest_commit'] : qrg_get_latest_github_commit();
     ?>
     <div id="qrg-version-box" class="qrg-version-box <?php echo $has_update ? 'has-update' : ( $is_success ? 'is-latest' : 'has-error' ); ?>" style="max-width:760px; margin:20px 0;">
         <?php if ( $has_update ) : ?>
@@ -2425,6 +2605,9 @@ function qrg_render_version_status_box( $version_info, $return_string = false ) 
                             </button>
                         </div>
 
+                        <!-- Commit Terakhir -->
+                        <?php qrg_render_commit_info_block( $latest_commit ); ?>
+
                         <!-- Panduan Cara Update -->
                         <details style="margin-top: 14px; padding-top: 12px; border-top: 1px dashed #e4c885; font-size: 13px; color: #5a4100;">
                             <summary style="cursor: pointer; font-weight: 600; color: #724b00; outline: none; user-select: none;">
@@ -2444,48 +2627,56 @@ function qrg_render_version_status_box( $version_info, $return_string = false ) 
 
         <?php elseif ( $is_success ) : ?>
             <!-- STATUS SUDAH TERBARU -->
-            <div style="background: #f8fafc; border: 1px solid #d2dce5; border-left: 5px solid #00a32a; border-radius: 8px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
-                <div style="display: flex; align-items: center; gap: 12px;">
-                    <div style="background: #e7f7ed; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
-                        <span class="dashicons dashicons-yes-alt" style="font-size: 22px; width: 22px; height: 22px; color: #00a32a;"></span>
+            <div style="background: #f8fafc; border: 1px solid #d2dce5; border-left: 5px solid #00a32a; border-radius: 8px; padding: 14px 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
+                <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+                    <div style="display: flex; align-items: center; gap: 12px;">
+                        <div style="background: #e7f7ed; border-radius: 50%; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;">
+                            <span class="dashicons dashicons-yes-alt" style="font-size: 22px; width: 22px; height: 22px; color: #00a32a;"></span>
+                        </div>
+                        <div>
+                            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                                <span style="font-weight: 700; font-size: 14px; color: #1d2327;">Versi Plugin: v<?php echo $current_version; ?></span>
+                                <span style="background: #e7f7ed; color: #008a20; border: 1px solid #b7ebc7; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 12px;">Terbaru</span>
+                            </div>
+                            <div style="font-size: 12px; color: #646970; margin-top: 3px;">
+                                Plugin Sekolah Anda sudah sesuai dengan versi terbaru di <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer">GitHub</a>.
+                                <span style="color: #8c8f94; margin-left: 4px;">(Terakhir dicek: <?php echo esc_html( $checked_diff ); ?> yang lalu)</span>
+                            </div>
+                        </div>
                     </div>
-                    <div>
-                        <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
-                            <span style="font-weight: 700; font-size: 14px; color: #1d2327;">Versi Plugin: v<?php echo $current_version; ?></span>
-                            <span style="background: #e7f7ed; color: #008a20; border: 1px solid #b7ebc7; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 12px;">Terbaru</span>
-                        </div>
-                        <div style="font-size: 12px; color: #646970; margin-top: 3px;">
-                            Plugin Sekolah Anda sudah sesuai dengan versi terbaru di <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer">GitHub</a>.
-                            <span style="color: #8c8f94; margin-left: 4px;">(Terakhir dicek: <?php echo esc_html( $checked_diff ); ?> yang lalu)</span>
-                        </div>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer" class="button button-small" style="display: inline-flex; align-items: center; gap: 4px;">
+                            <span class="dashicons dashicons-external" style="font-size: 14px; width: 14px; height: 14px;"></span> GitHub
+                        </a>
+                        <button type="button" class="button button-small qrg-refresh-update-btn" data-nonce="<?php echo esc_attr( $nonce ); ?>" style="display: inline-flex; align-items: center; gap: 4px;">
+                            <span class="dashicons dashicons-update" style="font-size: 14px; width: 14px; height: 14px;"></span> Cek Pembaruan
+                        </button>
                     </div>
                 </div>
-                <div style="display: flex; align-items: center; gap: 8px;">
-                    <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer" class="button button-small" style="display: inline-flex; align-items: center; gap: 4px;">
-                        <span class="dashicons dashicons-external" style="font-size: 14px; width: 14px; height: 14px;"></span> GitHub
-                    </a>
-                    <button type="button" class="button button-small qrg-refresh-update-btn" data-nonce="<?php echo esc_attr( $nonce ); ?>" style="display: inline-flex; align-items: center; gap: 4px;">
-                        <span class="dashicons dashicons-update" style="font-size: 14px; width: 14px; height: 14px;"></span> Cek Pembaruan
-                    </button>
-                </div>
+
+                <?php qrg_render_commit_info_block( $latest_commit ); ?>
             </div>
 
         <?php else : ?>
             <!-- GAGAL MENGHUBUNGI GITHUB -->
-            <div style="background: #fff; border: 1px solid #e2e4e7; border-left: 5px solid #d63638; border-radius: 8px; padding: 14px 18px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
-                <div style="display: flex; align-items: center; gap: 12px;">
-                    <span class="dashicons dashicons-warning" style="font-size: 24px; width: 24px; height: 24px; color: #d63638;"></span>
-                    <div>
-                        <div style="font-weight: 600; font-size: 13px; color: #1d2327;">Versi Plugin: v<?php echo $current_version; ?></div>
-                        <div style="font-size: 12px; color: #646970; margin-top: 2px;">
-                            Tidak dapat memeriksa versi terbaru di <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer">GitHub</a>. <?php echo esc_html( $version_info['error'] ?? '' ); ?>
+            <div style="background: #fff; border: 1px solid #e2e4e7; border-left: 5px solid #d63638; border-radius: 8px; padding: 14px 18px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
+                <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+                    <div style="display: flex; align-items: center; gap: 12px;">
+                        <span class="dashicons dashicons-warning" style="font-size: 24px; width: 24px; height: 24px; color: #d63638;"></span>
+                        <div>
+                            <div style="font-weight: 600; font-size: 13px; color: #1d2327;">Versi Plugin: v<?php echo $current_version; ?></div>
+                            <div style="font-size: 12px; color: #646970; margin-top: 2px;">
+                                Tidak dapat memeriksa versi terbaru di <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer">GitHub</a>. <?php echo esc_html( $version_info['error'] ?? '' ); ?>
+                            </div>
                         </div>
                     </div>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer" class="button button-small">Buka GitHub</a>
+                        <button type="button" class="button button-small qrg-refresh-update-btn" data-nonce="<?php echo esc_attr( $nonce ); ?>">Coba Lagi</button>
+                    </div>
                 </div>
-                <div style="display: flex; align-items: center; gap: 8px;">
-                    <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer" class="button button-small">Buka GitHub</a>
-                    <button type="button" class="button button-small qrg-refresh-update-btn" data-nonce="<?php echo esc_attr( $nonce ); ?>">Coba Lagi</button>
-                </div>
+
+                <?php qrg_render_commit_info_block( $latest_commit ); ?>
             </div>
         <?php endif; ?>
     </div>

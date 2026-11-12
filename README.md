@@ -4,7 +4,7 @@ Plugin WordPress untuk mengelola operasional sekolah: data civitas, PSB, jadwal,
 
 | | |
 |---|---|
-| **Versi** | 1.7.2 |
+| **Versi** | 1.7.3 |
 | **Author** | Ryan Dewantoro |
 | **Lisensi** | GPL-2.0-or-later |
 | **Platform** | WordPress 5.x+, PHP 7.4+ (disarankan PHP 8.x) |

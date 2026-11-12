@@ -2223,22 +2223,118 @@ function qrg_render_pembayaran_qr_admin_panel() {
 /**
  * Dapatkan versi plugin saat ini.
  *
+ * @param bool $from_file Jika true, baca langsung dari header file index.php.
  * @return string
  */
-function qrg_get_plugin_version() {
+function qrg_get_plugin_version( $from_file = true ) {
+    $plugin_dir = defined( 'QRG_PLUGIN_DIR' ) ? rtrim( QRG_PLUGIN_DIR, '/\\' ) : dirname( __DIR__ );
+    $index_file = $plugin_dir . '/index.php';
+
+    if ( $from_file && file_exists( $index_file ) ) {
+        $content = file_get_contents( $index_file, false, null, 0, 4096 );
+        if ( $content !== false && preg_match( '/^[ \t\/*#@]*Version:\s*([0-9a-zA-Z\.\-]+)/mi', $content, $m ) ) {
+            return trim( $m[1] );
+        }
+    }
+
     if ( defined( 'QRG_VERSION' ) && QRG_VERSION ) {
         return QRG_VERSION;
     }
-    if ( ! function_exists( 'get_file_data' ) ) {
-        require_once ABSPATH . 'wp-admin/includes/plugin.php';
-    }
-    if ( function_exists( 'get_file_data' ) && defined( 'QRG_PLUGIN_DIR' ) ) {
-        $plugin_data = get_file_data( QRG_PLUGIN_DIR . 'index.php', array( 'Version' => 'Version' ) );
+
+    if ( file_exists( $index_file ) ) {
+        if ( ! function_exists( 'get_file_data' ) ) {
+            require_once ABSPATH . 'wp-admin/includes/plugin.php';
+        }
+        $plugin_data = get_file_data( $index_file, array( 'Version' => 'Version' ) );
         if ( ! empty( $plugin_data['Version'] ) ) {
             return trim( $plugin_data['Version'] );
         }
     }
-    return '1.7.1';
+
+    return defined( 'QRG_VERSION' ) ? QRG_VERSION : '1.7.1';
+}
+
+/**
+ * Naikkan nomor patch versi (misal: 1.7.1 -> 1.7.2).
+ *
+ * @param string $version
+ * @return string
+ */
+function qrg_increment_patch_version( $version ) {
+    $v = trim( ltrim( (string) $version, 'vV' ) );
+    if ( empty( $v ) ) {
+        return '1.0.0';
+    }
+    $parts = explode( '.', $v );
+    if ( count( $parts ) === 1 ) {
+        $parts[] = '0';
+        $parts[] = '1';
+    } elseif ( count( $parts ) === 2 ) {
+        $parts[] = '1';
+    } else {
+        $last_idx = count( $parts ) - 1;
+        if ( is_numeric( $parts[ $last_idx ] ) ) {
+            $parts[ $last_idx ] = (int) $parts[ $last_idx ] + 1;
+        } else {
+            $parts[ $last_idx ] = '1';
+        }
+    }
+    return implode( '.', $parts );
+}
+
+/**
+ * Update file index.php dan README.md dengan nomor versi patch baru yang telah di-increment.
+ *
+ * @return array array( 'old_version' => string, 'new_version' => string )
+ */
+function qrg_bump_plugin_version() {
+    $plugin_dir = defined( 'QRG_PLUGIN_DIR' ) ? rtrim( QRG_PLUGIN_DIR, '/\\' ) : dirname( __DIR__ );
+    $index_file = $plugin_dir . '/index.php';
+
+    $old_version = qrg_get_plugin_version( true );
+    $new_version = qrg_increment_patch_version( $old_version );
+
+    // 1. Update index.php (Header Version & konstanta QRG_VERSION)
+    if ( file_exists( $index_file ) && is_writable( $index_file ) ) {
+        $index_content = file_get_contents( $index_file );
+        if ( $index_content !== false ) {
+            // Update " * Version: X.Y.Z"
+            $index_content = preg_replace(
+                '/(\*\s*Version:\s*)([^\r\n]+)/i',
+                '${1}' . $new_version,
+                $index_content,
+                1
+            );
+            // Update "define( 'QRG_VERSION', 'X.Y.Z' );"
+            $index_content = preg_replace(
+                '/(define\s*\(\s*[\'"]QRG_VERSION[\'"]\s*,\s*[\'"])([^\'"]+)([\'"]\s*\);)/i',
+                '${1}' . $new_version . '${3}',
+                $index_content,
+                1
+            );
+            file_put_contents( $index_file, $index_content );
+        }
+    }
+
+    // 2. Update README.md jika ada
+    $readme_file = $plugin_dir . '/README.md';
+    if ( file_exists( $readme_file ) && is_writable( $readme_file ) ) {
+        $readme_content = file_get_contents( $readme_file );
+        if ( $readme_content !== false ) {
+            $readme_content = preg_replace(
+                '/(\| \*\*Versi\*\* \| )([^\r\n\|]+)( \|)/i',
+                '${1}' . $new_version . '${3}',
+                $readme_content,
+                1
+            );
+            file_put_contents( $readme_file, $readme_content );
+        }
+    }
+
+    return array(
+        'old_version' => $old_version,
+        'new_version' => $new_version,
+    );
 }
 
 /**
@@ -2570,6 +2666,8 @@ function qrg_ajax_check_github_update() {
 /**
  * Handler AJAX untuk push perubahan lokal ke repositori GitHub.
  * Hanya dapat dijalankan oleh admin dan jika diakses dari domain serverstb.com.
+ * Setiap kali tombol push diklik, versi patch plugin (misal 1.7.1 -> 1.7.2)
+ * akan otomatis dinaikkan pada index.php dan README.md lalu di-push ke GitHub.
  */
 add_action( 'wp_ajax_qrg_git_push_to_github', 'qrg_ajax_git_push_to_github' );
 function qrg_ajax_git_push_to_github() {
@@ -2582,47 +2680,69 @@ function qrg_ajax_git_push_to_github() {
         wp_send_json_error( array( 'message' => 'Aksi push hanya diizinkan dari serverstb.com.' ) );
     }
 
-    $plugin_dir = defined( 'QRG_PLUGIN_DIR' ) ? QRG_PLUGIN_DIR : dirname( __DIR__ );
+    $plugin_dir = defined( 'QRG_PLUGIN_DIR' ) ? rtrim( QRG_PLUGIN_DIR, '/\\' ) : dirname( __DIR__ );
     $safe_dir   = escapeshellarg( $plugin_dir );
-    $git_bin    = 'git -c safe.directory=*';
 
-    // 1. Cek status git lokal
-    $status_out = shell_exec( "cd {$safe_dir} && {$git_bin} status --porcelain 2>&1" );
-    $has_changes = ! empty( trim( (string) $status_out ) );
+    // Pastikan konfigurasi safe.directory untuk user PHP / web server
+    @shell_exec( "git config --global --add safe.directory " . escapeshellarg( $plugin_dir ) . " 2>&1" );
+    @shell_exec( "git config --global --add safe.directory '*' 2>&1" );
 
-    if ( $has_changes ) {
-        $custom_msg = isset( $_POST['commit_message'] ) ? sanitize_text_field( wp_unslash( $_POST['commit_message'] ) ) : '';
-        if ( empty( $custom_msg ) ) {
-            $custom_msg = 'Pembaruan dari serverstb.com (' . current_time( 'd/m/Y H:i' ) . ' WIB)';
-        }
-        $escaped_msg = escapeshellarg( $custom_msg );
+    $git_bin = 'git -c safe.directory=' . escapeshellarg( $plugin_dir ) . ' -c safe.directory=\'*\' -c user.name=\'serverstb\' -c user.email=\'support@serverstb.com\'';
 
-        // Add & Commit
-        $commit_cmd = "cd {$safe_dir} && {$git_bin} add -A && {$git_bin} commit -m {$escaped_msg} 2>&1";
-        shell_exec( $commit_cmd );
+    // 1. Naikkan versi patch secara otomatis pada setiap push
+    $bump = qrg_bump_plugin_version();
+    $new_version = $bump['new_version'];
+    $old_version = $bump['old_version'];
+
+    // 2. Siapkan pesan commit
+    $custom_msg = isset( $_POST['commit_message'] ) ? sanitize_text_field( wp_unslash( $_POST['commit_message'] ) ) : '';
+    if ( empty( $custom_msg ) ) {
+        $custom_msg = 'Pembaruan ' . current_time( 'd/m/Y H:i:s' );
     }
 
-    // 2. Lakukan Git Push
+    // Sisipkan info versi baru ke pesan commit jika belum tercantum
+    if ( strpos( $custom_msg, $new_version ) === false ) {
+        $commit_full_msg = "v{$new_version} - " . $custom_msg;
+    } else {
+        $commit_full_msg = $custom_msg;
+    }
+    $escaped_msg = escapeshellarg( $commit_full_msg );
+
+    // 3. Git Add & Commit
+    $commit_cmd = "cd {$safe_dir} && {$git_bin} add -A && {$git_bin} commit -m {$escaped_msg} 2>&1";
+    $commit_out = shell_exec( $commit_cmd );
+
+    // 4. Git Push ke GitHub
     $push_cmd = "cd {$safe_dir} && {$git_bin} push origin main 2>&1";
     $push_out = shell_exec( $push_cmd );
 
-    // Hapus transient agar membaca data commit terbaru
+    // 5. Hapus transient agar membaca data commit dan rilis terbaru
     delete_transient( 'qrg_wpsekolah_github_version' );
     delete_transient( 'qrg_wpsekolah_github_latest_commit' );
 
     $info = qrg_check_github_version( true );
+    // Pastikan status versi langsung memperlihatkan versi baru yang telah di-push
+    $info['current_version'] = $new_version;
+    if ( ! empty( $info['remote_version'] ) && version_compare( $new_version, $info['remote_version'], '>=' ) ) {
+        $info['has_update'] = false;
+        $info['remote_version'] = $new_version;
+    }
+    set_transient( 'qrg_wpsekolah_github_version', $info, 6 * HOUR_IN_SECONDS );
+
     $html = qrg_render_version_status_box( $info, true );
 
     $has_error = ( strpos( (string) $push_out, 'fatal:' ) !== false ) || ( strpos( (string) $push_out, 'error:' ) !== false );
     $is_success = ! $has_error && ( ( strpos( (string) $push_out, 'Everything up-to-date' ) !== false ) || ( strpos( (string) $push_out, '-> main' ) !== false ) || empty( $push_out ) );
 
     if ( $is_success ) {
-        $message = $has_changes ? 'Berhasil melakukan commit dan push ke GitHub!' : 'Repositori sudah sesuai di GitHub (tidak ada perubahan baru yang perlu di-push).';
+        $message = "Berhasil memperbarui plugin ke versi v{$new_version} dan push ke repositori GitHub!";
         wp_send_json_success( array(
-            'message' => $message,
-            'log'     => $push_out,
-            'html'    => $html,
-            'info'    => $info,
+            'message'     => $message,
+            'old_version' => $old_version,
+            'new_version' => $new_version,
+            'log'         => $push_out,
+            'html'        => $html,
+            'info'        => $info,
         ) );
     } else {
         wp_send_json_error( array(
@@ -2647,7 +2767,7 @@ function qrg_render_version_status_box( $version_info, $return_string = false ) 
     $nonce = wp_create_nonce( 'qrg_check_update_nonce' );
     $push_nonce = wp_create_nonce( 'qrg_git_push_nonce' );
     $is_serverstb = qrg_is_serverstb_host();
-    $current_version = esc_html( $version_info['current_version'] ?? '1.7.1' );
+    $current_version = esc_html( ! empty( $version_info['current_version'] ) ? $version_info['current_version'] : qrg_get_plugin_version() );
     $remote_version  = esc_html( $version_info['remote_version'] ?? '' );
     $has_update      = ! empty( $version_info['has_update'] );
     $is_success      = ! empty( $version_info['success'] );

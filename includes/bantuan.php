@@ -3116,14 +3116,11 @@ function qrg_bantuan_page_callback() {
         </div>
 
         <!-- Pemberitahuan Non-Komersial -->
-        <div style="background:#fff8e5; border:1px solid #f0c33c; border-left:4px solid #dba617; border-radius:6px; padding:16px 20px; max-width:760px; margin-top:20px; display:flex; align-items:flex-start; gap:12px;">
-            <span class="dashicons dashicons-warning" style="font-size:24px; width:24px; height:24px; color:#b8860b; flex-shrink:0; margin-top:2px;"></span>
-            <div>
-                <strong style="font-size:14px; color:#724b00; display:block; margin-bottom:4px;">Pemberitahuan Lisensi & Penggunaan:</strong>
-                <p style="margin:0; font-size:13px; color:#5a4100; line-height:1.6;">
-                    Aplikasi / plugin <strong>Sekolah</strong> ini disediakan secara gratis untuk kemajuan dunia pendidikan. Aplikasi ini <strong>TIDAK UNTUK DIPERJUALBELIKAN ATAU DIKOMERSIALKAN</strong> dalam bentuk apa pun.
-                </p>
-            </div>
+        <div style="background:#fff8e5; border:1px solid #f0c33c; border-left:4px solid #dba617; border-radius:6px; padding:12px 18px; max-width:760px; margin-top:20px; display:flex; align-items:center; gap:10px;">
+            <span class="dashicons dashicons-shield-alt" style="font-size:20px; width:20px; height:20px; color:#b8860b; flex-shrink:0;"></span>
+            <p style="margin:0; font-size:13px; color:#5a4100; line-height:1.5;">
+                <strong>Lisensi Non-Komersial:</strong> Plugin ini disediakan gratis untuk dunia pendidikan dan <strong>dilarang diperjualbelikan atau dikomersialkan</strong>.
+            </p>
         </div>
     </div>
 

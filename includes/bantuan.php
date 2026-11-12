@@ -2584,9 +2584,10 @@ function qrg_ajax_git_push_to_github() {
 
     $plugin_dir = defined( 'QRG_PLUGIN_DIR' ) ? QRG_PLUGIN_DIR : dirname( __DIR__ );
     $safe_dir   = escapeshellarg( $plugin_dir );
+    $git_bin    = 'git -c safe.directory=*';
 
     // 1. Cek status git lokal
-    $status_out = shell_exec( "cd {$safe_dir} && git status --porcelain 2>&1" );
+    $status_out = shell_exec( "cd {$safe_dir} && {$git_bin} status --porcelain 2>&1" );
     $has_changes = ! empty( trim( (string) $status_out ) );
 
     if ( $has_changes ) {
@@ -2597,12 +2598,12 @@ function qrg_ajax_git_push_to_github() {
         $escaped_msg = escapeshellarg( $custom_msg );
 
         // Add & Commit
-        $commit_cmd = "cd {$safe_dir} && git add -A && git commit -m {$escaped_msg} 2>&1";
+        $commit_cmd = "cd {$safe_dir} && {$git_bin} add -A && {$git_bin} commit -m {$escaped_msg} 2>&1";
         shell_exec( $commit_cmd );
     }
 
     // 2. Lakukan Git Push
-    $push_cmd = "cd {$safe_dir} && git push origin main 2>&1";
+    $push_cmd = "cd {$safe_dir} && {$git_bin} push origin main 2>&1";
     $push_out = shell_exec( $push_cmd );
 
     // Hapus transient agar membaca data commit terbaru
@@ -2612,9 +2613,10 @@ function qrg_ajax_git_push_to_github() {
     $info = qrg_check_github_version( true );
     $html = qrg_render_version_status_box( $info, true );
 
-    $is_success = ( strpos( (string) $push_out, 'Everything up-to-date' ) !== false ) || ( strpos( (string) $push_out, '-> main' ) !== false );
+    $has_error = ( strpos( (string) $push_out, 'fatal:' ) !== false ) || ( strpos( (string) $push_out, 'error:' ) !== false );
+    $is_success = ! $has_error && ( ( strpos( (string) $push_out, 'Everything up-to-date' ) !== false ) || ( strpos( (string) $push_out, '-> main' ) !== false ) || empty( $push_out ) );
 
-    if ( $is_success || empty( $push_out ) ) {
+    if ( $is_success ) {
         $message = $has_changes ? 'Berhasil melakukan commit dan push ke GitHub!' : 'Repositori sudah sesuai di GitHub (tidak ada perubahan baru yang perlu di-push).';
         wp_send_json_success( array(
             'message' => $message,

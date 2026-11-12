@@ -2930,9 +2930,23 @@ function qrg_bantuan_page_callback() {
             var $btn = $(this);
             if ($btn.prop('disabled')) return;
 
-            var commitMsg = prompt('Masukkan pesan commit (atau klik OK untuk menggunakan pesan otomatis):', '');
+            var now = new Date();
+            var pad = function(n) { return n < 10 ? '0' + n : n; };
+            var d = pad(now.getDate());
+            var m = pad(now.getMonth() + 1);
+            var y = now.getFullYear();
+            var h = pad(now.getHours());
+            var min = pad(now.getMinutes());
+            var s = pad(now.getSeconds());
+            var autoDatetime = d + '/' + m + '/' + y + ' ' + h + ':' + min + ':' + s;
+            var defaultMsg = 'Pembaruan ' + autoDatetime;
+
+            var commitMsg = prompt('Masukkan pesan commit (atau klik OK untuk menggunakan pesan otomatis):', defaultMsg);
             if (commitMsg === null) {
                 return; // Dibatalkan oleh user
+            }
+            if ($.trim(commitMsg) === '') {
+                commitMsg = defaultMsg;
             }
 
             var nonce = $btn.data('nonce');

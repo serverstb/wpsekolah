@@ -2513,7 +2513,25 @@ function qrg_render_commit_info_block( $latest_commit ) {
 }
 
 /**
- * Cek versi terbaru dari repositori GitHub serverstb/wpsekolah.
+ * Dapatkan hash commit lokal saat ini (dari .git jika ada, atau dari database).
+ *
+ * @return string
+ */
+function qrg_get_local_commit_sha() {
+    $plugin_dir = defined( 'QRG_PLUGIN_DIR' ) ? rtrim( QRG_PLUGIN_DIR, '/\\' ) : dirname( __DIR__ );
+    if ( is_dir( $plugin_dir . '/.git' ) ) {
+        $sha = @shell_exec( "cd " . escapeshellarg( $plugin_dir ) . " && git -c safe.directory=* rev-parse HEAD 2>/dev/null" );
+        if ( ! empty( $sha ) && preg_match( '/^[0-9a-f]{40}$/i', trim( $sha ) ) ) {
+            return trim( $sha );
+        }
+    }
+    return get_option( 'qrg_installed_commit_sha', '' );
+}
+
+/**
+ * Cek versi dan commit terbaru dari repositori GitHub serverstb/wpsekolah.
+ * Memeriksa langsung commit terbaru via GitHub API commits:
+ * https://api.github.com/repos/serverstb/wpsekolah/commits?per_page=1
  *
  * @param bool $force_refresh Paksa pengecekan ulang tanpa menggunakan transient cache.
  * @return array
@@ -2528,66 +2546,63 @@ function qrg_check_github_version( $force_refresh = false ) {
         }
     }
 
-    $current_version = qrg_get_plugin_version();
-    $remote_version  = '';
-    $release_notes   = '';
-    $published_at    = '';
+    $current_version = qrg_get_plugin_version( true );
     $repo_url        = 'https://github.com/serverstb/wpsekolah';
     $download_url    = 'https://github.com/serverstb/wpsekolah/archive/refs/heads/main.zip';
     $commits_url     = 'https://github.com/serverstb/wpsekolah/commits/main';
 
     $request_args = array(
-        'timeout'    => 12,
-        'user-agent' => 'WordPress/' . get_bloginfo( 'version' ) . '; ' . home_url(),
+        'timeout'    => 15,
+        'user-agent' => 'PHP-GitHub-Monitor/' . $current_version . '; ' . home_url(),
         'sslverify'  => false,
     );
 
-    // 1. Cek melalui GitHub API Releases terlebih dahulu jika ada release
-    $releases_api_url = 'https://api.github.com/repos/serverstb/wpsekolah/releases/latest';
-    $response = wp_remote_get( $releases_api_url, array_merge( $request_args, array(
-        'headers' => array( 'Accept' => 'application/vnd.github.v3+json' ),
-    ) ) );
+    // 1. Ambil data commit terakhir langsung dari GitHub Commits API
+    $latest_commit = qrg_get_latest_github_commit( $force_refresh );
+    $remote_sha    = $latest_commit['sha'] ?? '';
+    $commit_msg    = $latest_commit['commit']['message'] ?? '';
+    $published_at  = $latest_commit['commit']['author']['date'] ?? '';
+    $local_sha     = qrg_get_local_commit_sha();
 
-    if ( ! is_wp_error( $response ) && (int) wp_remote_retrieve_response_code( $response ) === 200 ) {
-        $body = wp_remote_retrieve_body( $response );
-        $json = json_decode( $body, true );
-        if ( is_array( $json ) && ! empty( $json['tag_name'] ) ) {
-            $remote_version = ltrim( trim( $json['tag_name'] ), 'vV' );
-            if ( ! empty( $json['body'] ) ) {
-                $release_notes = trim( $json['body'] );
-            }
-            if ( ! empty( $json['published_at'] ) ) {
-                $published_at = $json['published_at'];
-            }
-            if ( ! empty( $json['zipball_url'] ) ) {
-                $download_url = $json['zipball_url'];
-            }
-        }
+    $remote_version = '';
+    $release_notes  = $commit_msg;
+
+    // 2. Ekstrak nomor versi dari pesan commit terbaru (contoh: "v1.7.3 - ...")
+    if ( ! empty( $commit_msg ) && preg_match( '/\bv?([0-9]+\.[0-9]+(?:\.[0-9]+)?)\b/i', $commit_msg, $v_match ) ) {
+        $remote_version = $v_match[1];
     }
 
-    // 2. Fallback: Cek file index.php mentah di branch main bila releases belum dibuat
-    if ( empty( $remote_version ) ) {
-        $raw_url = 'https://raw.githubusercontent.com/serverstb/wpsekolah/main/index.php';
+    // 3. Fallback: Cek file index.php mentah di GitHub branch main
+    if ( empty( $remote_version ) || version_compare( $remote_version, $current_version, '<=' ) ) {
+        $raw_url = 'https://raw.githubusercontent.com/serverstb/wpsekolah/main/index.php?t=' . time();
         $response = wp_remote_get( $raw_url, $request_args );
-
-        // Fallback alternatif ke branch master jika main gagal
-        if ( is_wp_error( $response ) || (int) wp_remote_retrieve_response_code( $response ) !== 200 ) {
-            $raw_url = 'https://raw.githubusercontent.com/serverstb/wpsekolah/master/index.php';
-            $response = wp_remote_get( $raw_url, $request_args );
-        }
-
         if ( ! is_wp_error( $response ) && (int) wp_remote_retrieve_response_code( $response ) === 200 ) {
             $body = wp_remote_retrieve_body( $response );
             if ( preg_match( '/^[ \t\/*#]*Version:\s*([0-9\.]+)/mi', $body, $matches ) ) {
-                $remote_version = trim( $matches[1] );
+                $raw_v = trim( $matches[1] );
+                if ( version_compare( $raw_v, $current_version, '>' ) ) {
+                    $remote_version = $raw_v;
+                }
             }
         }
     }
 
-    $latest_commit = qrg_get_latest_github_commit( $force_refresh );
+    // Jika belum ada nomor versi terdeteksi, samakan dengan current_version
+    if ( empty( $remote_version ) ) {
+        $remote_version = $current_version;
+    }
 
-    if ( ! empty( $remote_version ) ) {
-        $has_update = version_compare( $remote_version, $current_version, '>' );
+    // 4. Deteksi Pembaruan:
+    //    a) Jika nomor versi remote lebih tinggi dari versi lokal saat ini
+    //    b) ATAU jika commit hash remote berbeda dari commit hash lokal
+    $has_update = false;
+    if ( version_compare( $remote_version, $current_version, '>' ) ) {
+        $has_update = true;
+    } elseif ( ! empty( $remote_sha ) && ! empty( $local_sha ) && strtolower( $remote_sha ) !== strtolower( $local_sha ) ) {
+        $has_update = true;
+    }
+
+    if ( $latest_commit !== false ) {
         $data = array(
             'success'         => true,
             'current_version' => $current_version,
@@ -2601,6 +2616,8 @@ function qrg_check_github_version( $force_refresh = false ) {
             'release_notes'   => $release_notes,
             'published_at'    => $published_at,
             'latest_commit'   => $latest_commit,
+            'local_sha'       => $local_sha,
+            'remote_sha'      => $remote_sha,
         );
         // Simpan transient selama 6 jam
         set_transient( $transient_key, $data, 6 * HOUR_IN_SECONDS );
@@ -2608,21 +2625,21 @@ function qrg_check_github_version( $force_refresh = false ) {
     }
 
     // Gagal membaca versi dari GitHub
-    $error_msg = is_wp_error( $response ) ? $response->get_error_message() : 'Gagal menghubungi server GitHub.';
     $data = array(
         'success'         => false,
-        'error'           => $error_msg,
+        'error'           => 'Gagal menghubungi GitHub API commits.',
         'current_version' => $current_version,
-        'remote_version'  => null,
+        'remote_version'  => $current_version,
         'has_update'      => false,
         'checked_at'      => current_time( 'timestamp' ),
         'checked_time'    => current_time( 'd/m/Y H:i' ),
         'repo_url'        => $repo_url,
         'download_url'    => $download_url,
         'commits_url'     => $commits_url,
-        'latest_commit'   => $latest_commit,
+        'latest_commit'   => false,
+        'local_sha'       => $local_sha,
+        'remote_sha'      => '',
     );
-    // Simpan pesan error selama 10 menit agar tidak terus-menerus membebani request
     set_transient( $transient_key, $data, 10 * MINUTE_IN_SECONDS );
     return $data;
 }
@@ -2657,10 +2674,130 @@ function qrg_ajax_check_github_update() {
     $info = qrg_check_github_version( true );
     $html = qrg_render_version_status_box( $info, true );
 
+    $message = ! empty( $info['has_update'] )
+        ? 'Pembaruan tersedia di GitHub! Silakan klik tombol "Perbarui Plugin Sekarang".'
+        : 'Pengecekan selesai: Plugin Sekolah Anda sudah menggunakan versi dan commit paling baru dari GitHub.';
+
     wp_send_json_success( array(
-        'info' => $info,
-        'html' => $html,
+        'message' => $message,
+        'info'    => $info,
+        'html'    => $html,
     ) );
+}
+
+/**
+ * Handler AJAX untuk memasang pembaruan plugin langsung dari GitHub.
+ */
+add_action( 'wp_ajax_qrg_apply_github_update', 'qrg_ajax_apply_github_update' );
+function qrg_ajax_apply_github_update() {
+    if ( ! current_user_can( 'manage_options' ) ) {
+        wp_send_json_error( array( 'message' => 'Akses ditolak.' ) );
+    }
+    check_ajax_referer( 'qrg_apply_update_nonce', 'nonce' );
+
+    $plugin_dir  = defined( 'QRG_PLUGIN_DIR' ) ? rtrim( QRG_PLUGIN_DIR, '/\\' ) : dirname( __DIR__ );
+    $safe_dir    = escapeshellarg( $plugin_dir );
+    $is_git_repo = is_dir( $plugin_dir . '/.git' );
+
+    $update_success = false;
+    $log_output     = '';
+
+    // Metode 1: Jika merupakan repositori Git lokal (serverstb.com)
+    if ( $is_git_repo ) {
+        @shell_exec( "git config --global --add safe.directory " . escapeshellarg( $plugin_dir ) . " 2>&1" );
+        @shell_exec( "git config --global --add safe.directory '*' 2>&1" );
+        $git_bin = 'git -c safe.directory=' . escapeshellarg( $plugin_dir ) . ' -c safe.directory=\'*\'';
+
+        $pull_cmd = "cd {$safe_dir} && {$git_bin} fetch origin main 2>&1 && {$git_bin} reset --hard origin/main 2>&1";
+        $pull_out = shell_exec( $pull_cmd );
+        $log_output = (string) $pull_out;
+
+        if ( strpos( $log_output, 'HEAD is now at' ) !== false || strpos( $log_output, 'Already up to date' ) !== false || ( strpos( $log_output, 'fatal:' ) === false && strpos( $log_output, 'error:' ) === false ) ) {
+            $update_success = true;
+        }
+    }
+
+    // Metode 2: Fallback unduh arsip ZIP jika bukan git atau git reset gagal
+    if ( ! $update_success ) {
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        WP_Filesystem();
+        global $wp_filesystem;
+
+        $zip_url  = 'https://github.com/serverstb/wpsekolah/archive/refs/heads/main.zip';
+        $temp_zip = download_url( $zip_url, 60 );
+
+        if ( is_wp_error( $temp_zip ) ) {
+            wp_send_json_error( array(
+                'message' => 'Gagal mengunduh pembaruan dari GitHub: ' . $temp_zip->get_error_message(),
+                'log'     => $log_output,
+            ) );
+        }
+
+        $temp_extract_dir = get_temp_dir() . 'qrg_update_' . uniqid();
+        $unzip_result     = unzip_file( $temp_zip, $temp_extract_dir );
+        @unlink( $temp_zip );
+
+        if ( is_wp_error( $unzip_result ) ) {
+            wp_send_json_error( array(
+                'message' => 'Gagal mengekstrak file pembaruan: ' . $unzip_result->get_error_message(),
+                'log'     => $log_output,
+            ) );
+        }
+
+        $source_dir = $temp_extract_dir . '/wpsekolah-main';
+        if ( ! is_dir( $source_dir ) ) {
+            $scanned = scandir( $temp_extract_dir );
+            foreach ( $scanned as $item ) {
+                if ( $item !== '.' && $item !== '..' && is_dir( $temp_extract_dir . '/' . $item ) ) {
+                    $source_dir = $temp_extract_dir . '/' . $item;
+                    break;
+                }
+            }
+        }
+
+        if ( is_dir( $source_dir ) ) {
+            $copied = copy_dir( $source_dir, $plugin_dir );
+            $wp_filesystem->delete( $temp_extract_dir, true );
+            if ( ! is_wp_error( $copied ) ) {
+                $update_success = true;
+            } else {
+                wp_send_json_error( array(
+                    'message' => 'Gagal menyalin file pembaruan: ' . $copied->get_error_message(),
+                ) );
+            }
+        } else {
+            $wp_filesystem->delete( $temp_extract_dir, true );
+            wp_send_json_error( array( 'message' => 'Format arsip ZIP tidak sesuai.' ) );
+        }
+    }
+
+    if ( $update_success ) {
+        // Hapus transient cache
+        delete_transient( 'qrg_wpsekolah_github_version' );
+        delete_transient( 'qrg_wpsekolah_github_latest_commit' );
+
+        $latest_commit = qrg_get_latest_github_commit( true );
+        if ( ! empty( $latest_commit['sha'] ) ) {
+            update_option( 'qrg_installed_commit_sha', $latest_commit['sha'] );
+        }
+
+        $info = qrg_check_github_version( true );
+        $html = qrg_render_version_status_box( $info, true );
+
+        $new_ver = $info['current_version'] ?? qrg_get_plugin_version( true );
+        wp_send_json_success( array(
+            'message' => "Plugin Sekolah berhasil diperbarui ke versi v{$new_ver}!",
+            'version' => $new_ver,
+            'html'    => $html,
+            'info'    => $info,
+            'log'     => $log_output,
+        ) );
+    } else {
+        wp_send_json_error( array(
+            'message' => 'Gagal memperbarui plugin Sekolah: ' . $log_output,
+            'log'     => $log_output,
+        ) );
+    }
 }
 
 /**
@@ -2764,8 +2901,9 @@ function qrg_render_version_status_box( $version_info, $return_string = false ) 
     if ( $return_string ) {
         ob_start();
     }
-    $nonce = wp_create_nonce( 'qrg_check_update_nonce' );
-    $push_nonce = wp_create_nonce( 'qrg_git_push_nonce' );
+    $nonce        = wp_create_nonce( 'qrg_check_update_nonce' );
+    $push_nonce   = wp_create_nonce( 'qrg_git_push_nonce' );
+    $update_nonce = wp_create_nonce( 'qrg_apply_update_nonce' );
     $is_serverstb = qrg_is_serverstb_host();
     $current_version = esc_html( ! empty( $version_info['current_version'] ) ? $version_info['current_version'] : qrg_get_plugin_version() );
     $remote_version  = esc_html( $version_info['remote_version'] ?? '' );
@@ -2791,12 +2929,15 @@ function qrg_render_version_status_box( $version_info, $return_string = false ) 
                             <span style="background: #d63638; color: #fff; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.5px;">Versi Baru</span>
                         </div>
                         <p style="margin: 0 0 14px; font-size: 14px; line-height: 1.6; color: #5a4100;">
-                            Versi terbaru <strong>v<?php echo $remote_version; ?></strong> telah dirilis di GitHub. Anda saat ini menggunakan versi <strong>v<?php echo $current_version; ?></strong>.
+                            Pembaruan terbaru <strong>v<?php echo $remote_version; ?></strong> telah dirilis di GitHub. Anda saat ini menggunakan versi <strong>v<?php echo $current_version; ?></strong>.
                         </p>
 
                         <!-- Action Buttons -->
                         <div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 12px;">
-                            <a href="<?php echo $download_url; ?>" class="button button-primary" style="display: inline-flex; align-items: center; gap: 6px; font-weight: 600; padding: 4px 14px; height: auto;">
+                            <button type="button" class="button button-primary qrg-apply-update-btn" data-nonce="<?php echo esc_attr( $update_nonce ); ?>" style="display: inline-flex; align-items: center; gap: 6px; font-weight: 700; background: #008a20; border-color: #008a20; color: #fff; padding: 5px 14px; height: auto; box-shadow: 0 1px 3px rgba(0,0,0,0.12);">
+                                <span class="dashicons dashicons-update" style="font-size: 18px; width: 18px; height: 18px;"></span> Perbarui Plugin Sekarang
+                            </button>
+                            <a href="<?php echo $download_url; ?>" class="button" style="display: inline-flex; align-items: center; gap: 6px; font-weight: 600; padding: 4px 14px; height: auto;">
                                 <span class="dashicons dashicons-download" style="font-size: 18px; width: 18px; height: 18px;"></span> Unduh ZIP Terbaru
                             </a>
                             <a href="<?php echo $repo_url; ?>" target="_blank" rel="noopener noreferrer" class="button button-secondary" style="display: inline-flex; align-items: center; gap: 6px; padding: 4px 12px; height: auto;">
@@ -3045,6 +3186,9 @@ function qrg_bantuan_page_callback() {
                 success: function(response) {
                     if (response && response.success && response.data && response.data.html) {
                         $('#qrg-version-box').replaceWith(response.data.html);
+                        if (response.data.message) {
+                            alert(response.data.message);
+                        }
                     } else {
                         window.location.reload();
                     }
@@ -3053,6 +3197,49 @@ function qrg_bantuan_page_callback() {
                     alert('Gagal memeriksa pembaruan ke GitHub. Silakan coba kembali.');
                     $btn.prop('disabled', false);
                     $icon.removeClass('qrg-spinning');
+                }
+            });
+        });
+
+        // AJAX Pasang Pembaruan Plugin dari GitHub
+        $(document).on('click', '.qrg-apply-update-btn', function(e) {
+            e.preventDefault();
+            var $btn = $(this);
+            if ($btn.prop('disabled')) return;
+
+            if (!confirm('Apakah Anda yakin ingin memperbarui plugin Sekolah ke versi terbaru dari GitHub?')) {
+                return;
+            }
+
+            var nonce = $btn.data('nonce');
+            var originalHtml = $btn.html();
+            $btn.prop('disabled', true).html('<span class="dashicons dashicons-update qrg-spinning" style="font-size:16px; width:16px; height:16px;"></span> Sedang Memperbarui...');
+
+            $.ajax({
+                url: ajaxurl,
+                type: 'POST',
+                data: {
+                    action: 'qrg_apply_github_update',
+                    nonce: nonce
+                },
+                timeout: 120000,
+                success: function(response) {
+                    if (response && response.success) {
+                        alert(response.data && response.data.message ? response.data.message : 'Plugin berhasil diperbarui!');
+                        if (response.data && response.data.html) {
+                            $('#qrg-version-box').replaceWith(response.data.html);
+                        } else {
+                            window.location.reload();
+                        }
+                    } else {
+                        var err = (response && response.data && response.data.message) ? response.data.message : 'Gagal memperbarui plugin.';
+                        alert(err);
+                        $btn.prop('disabled', false).html(originalHtml);
+                    }
+                },
+                error: function() {
+                    alert('Terjadi kesalahan jaringan atau timeout saat memperbarui plugin.');
+                    $btn.prop('disabled', false).html(originalHtml);
                 }
             });
         });

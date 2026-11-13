@@ -16,7 +16,7 @@ function qrg_register_tagihan_cpt() {
         'public'             => true,
         'publicly_queryable' => true,
         'exclude_from_search'=> true,
-        'show_in_menu'       => false, // Akses via Sekolah → Akuntansi
+        'show_in_menu'       => 'master-data-plugin', // Dikelompokkan ke menu Keuangan
         'has_archive'        => false,
         'rewrite'            => array('slug' => 'spp'),
         'supports'           => [ 'title' ],

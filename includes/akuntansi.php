@@ -28,14 +28,12 @@ function qrg_akuntansi_register_menu() {
     );
 }
 
-// Sembunyikan CPT akuntansi dari sidebar (akses via halaman Akuntansi)
+// Sembunyikan CPT akuntansi sub-item dari sidebar (akses via halaman Akuntansi)
 add_action( 'admin_menu', 'qrg_akuntansi_hide_cpt_submenus', 999 );
 function qrg_akuntansi_hide_cpt_submenus() {
     $parent = QRG_AKUNTANSI_PARENT;
     $hide   = [
-        'edit.php?post_type=master_tagihan',
         'post-new.php?post_type=master_tagihan',
-        'edit.php?post_type=master_gaji_guru',
         'post-new.php?post_type=master_gaji_guru',
         'edit.php?post_type=master_pembelian',
         'post-new.php?post_type=master_pembelian',

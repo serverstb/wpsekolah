@@ -20,7 +20,7 @@ function qrg_register_gaji_guru_cpt() {
         'publicly_queryable' => false,
         'exclude_from_search'=> true,
         'show_ui'            => true,
-        'show_in_menu'       => false, // Akses via Sekolah → Akuntansi / tombol Data Guru
+        'show_in_menu'       => 'master-data-plugin', // Dikelompokkan ke menu Keuangan
         'supports'           => [ 'title' ],
         'has_archive'        => false,
     ] );

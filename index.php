@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Sekolah
  * Description: Sistem Informasi Sekolah
- * Version: 1.7.6
+ * Version: 1.7.7
  * Author: Ryan Dewantoro
  * License: GPL2
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 // Definisikan Path konstanta menggunakan file index.php saat ini
 define( 'QRG_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'QRG_PLUGIN_BASENAME', plugin_basename( __FILE__ ) );
-define( 'QRG_VERSION', '1.7.6' );
+define( 'QRG_VERSION', '1.7.7' );
 
 // Load semua file modular menu dari folder includes
 require_once QRG_PLUGIN_DIR . 'includes/security.php';
@@ -341,8 +341,8 @@ function qrg_add_master_menu() {
     );
 }
 
-// Mengurutkan Submenu agar Dashboard berada di urutan pertama dan bernama "Dashboard"
-add_action( 'admin_menu', 'qrg_reorder_master_submenus', 999 );
+// Mengurutkan dan Mengelompokkan Submenu Sekolah
+add_action( 'admin_menu', 'qrg_reorder_master_submenus', 1000 );
 function qrg_reorder_master_submenus() {
     global $submenu;
     if ( ! isset( $submenu['master-data-plugin'] ) ) {
@@ -350,57 +350,178 @@ function qrg_reorder_master_submenus() {
     }
     
     $master_submenus = $submenu['master-data-plugin'];
-    $new_submenus = array();
-    $dashboard_item = null;
     
-    // Cari item dengan slug 'master-data-plugin', simpan satu dan buang duplikatnya
-    foreach ( $master_submenus as $key => $item ) {
-        if ( isset( $item[2] ) && $item[2] === 'master-data-plugin' ) {
+    // Daftar menu yang sengaja disembunyikan (akses via tombol di halaman utama terkait)
+    $hidden_slugs = [
+        'edit.php?post_type=master_jalur',
+        'post-new.php?post_type=master_jalur',
+        'edit.php?post_type=master_biaya',
+        'post-new.php?post_type=master_biaya',
+        'edit.php?post_type=master_jadwal',
+        'post-new.php?post_type=master_jadwal',
+        'edit.php?post_type=master_tugas',
+        'post-new.php?post_type=master_tugas',
+        'post-new.php?post_type=master_inventaris',
+        'post-new.php?post_type=master_tagihan',
+        'post-new.php?post_type=master_gaji_guru',
+        'edit.php?post_type=master_pembelian',
+        'post-new.php?post_type=master_pembelian',
+        'edit.php?post_type=master_rkas',
+        'post-new.php?post_type=master_rkas',
+        'edit.php?post_type=master_presensi_guru',
+        'post-new.php?post_type=master_presensi_guru',
+        'psb-form-settings',
+        'qrg-generate-kelas',
+    ];
+
+    $items_by_slug = [];
+    $dashboard_item = null;
+
+    foreach ( $master_submenus as $item ) {
+        if ( ! isset( $item[2] ) ) {
+            continue;
+        }
+        $slug = $item[2];
+
+        if ( in_array( $slug, $hidden_slugs, true ) ) {
+            continue;
+        }
+
+        if ( $slug === 'master-data-plugin' ) {
             if ( ! $dashboard_item ) {
                 $dashboard_item = $item;
-                $dashboard_item[0] = 'Dashboard'; // Ubah label nama menjadi Dashboard
+                $dashboard_item[0] = 'Dashboard';
             }
-            unset( $master_submenus[$key] );
+            continue;
         }
-        // Hapus menu yang diakses via tombol di halaman terkait
-        if ( isset( $item[2] ) && (
-            $item[2] === 'edit.php?post_type=master_jalur' ||
-            $item[2] === 'post-new.php?post_type=master_jalur' ||
-            $item[2] === 'edit.php?post_type=master_biaya' ||
-            $item[2] === 'edit.php?post_type=master_jadwal' ||
-            $item[2] === 'post-new.php?post_type=master_jadwal' ||
-            $item[2] === 'edit.php?post_type=master_tugas' ||
-            $item[2] === 'post-new.php?post_type=master_tugas' ||
-            $item[2] === 'edit.php?post_type=master_inventaris' ||
-            $item[2] === 'post-new.php?post_type=master_inventaris' ||
-            $item[2] === 'edit.php?post_type=master_tagihan' ||
-            $item[2] === 'post-new.php?post_type=master_tagihan' ||
-            $item[2] === 'edit.php?post_type=master_gaji_guru' ||
-            $item[2] === 'post-new.php?post_type=master_gaji_guru' ||
-            $item[2] === 'edit.php?post_type=master_pembelian' ||
-            $item[2] === 'post-new.php?post_type=master_pembelian' ||
-            $item[2] === 'edit.php?post_type=master_rkas' ||
-            $item[2] === 'post-new.php?post_type=master_rkas' ||
-            $item[2] === 'edit.php?post_type=master_presensi_guru' ||
-            $item[2] === 'post-new.php?post_type=master_presensi_guru' ||
-            $item[2] === 'psb-form-settings' ||
-            $item[2] === 'qrg-generate-kelas'
-        ) ) {
-            unset( $master_submenus[$key] );
-        }
+
+        $items_by_slug[ $slug ] = $item;
     }
-    
-    // Masukkan dashboard ke urutan paling pertama
+
+    // Definisi Pengelompokan Submenu Sekolah:
+    // 1. Data Master
+    // 2. Keuangan
+    // 3. Sarana & Prasarana
+    // 4. Kesiswaan & Operasional
+    // 5. Pengaturan & Bantuan
+    $groups = [
+        'Data Master' => [
+            'edit.php?post_type=master_siswa' => 'Data Siswa',
+            'edit.php?post_type=master_guru'  => 'Data Guru',
+            'edit.php?post_type=master_kelas' => 'Data Kelas',
+            'edit.php?post_type=master_mapel' => 'Mata Pelajaran',
+            'edit.php?post_type=master_psb'   => 'Penerimaan Siswa (PSB)',
+        ],
+        'Keuangan' => [
+            'qrg-akuntansi'                       => 'Keuangan & Akuntansi',
+            'edit.php?post_type=master_tagihan'   => 'Tagihan Siswa',
+            'edit.php?post_type=master_gaji_guru' => 'Gaji Guru',
+            'qrg-setting'                         => 'Setting Pembayaran',
+        ],
+        'Sarana & Prasarana' => [
+            'edit.php?post_type=master_ruangan'      => 'Data Ruangan',
+            'edit.php?post_type=master_inventaris'   => 'Data Inventaris',
+            'edit.php?post_type=master_perpustakaan' => 'Perpustakaan',
+        ],
+        'Kesiswaan & Operasional' => [
+            'qrg-presensi'                           => 'Presensi',
+            'edit.php?post_type=master_izin_siswa'   => 'Pengajuan Izin',
+            'edit.php?post_type=master_antar_jemput' => 'Antar Jemput',
+            'edit.php?post_type=master_kesehatan'    => 'Kesehatan & Konseling',
+            'edit.php?post_type=master_pengumuman'   => 'Pengumuman',
+            'edit.php?post_type=master_saran_siswa'  => 'Kritik & Saran',
+        ],
+        'Pengaturan & Bantuan' => [
+            'qrg-aj-settings' => 'Setelan Antar Jemput',
+            'qrg-bantuan'     => 'Bantuan & Dokumentasi',
+        ],
+    ];
+
+    $new_submenus = [];
+
+    // 1. Dashboard selalu di paling atas
     if ( $dashboard_item ) {
         $new_submenus[] = $dashboard_item;
     }
-    
-    // Gabungkan sisanya
-    foreach ( $master_submenus as $item ) {
-        $new_submenus[] = $item;
+
+    $used_slugs = [];
+
+    // 2. Susun item per kelompok dengan header pembagi
+    foreach ( $groups as $group_title => $group_items ) {
+        $matched_items = [];
+        foreach ( $group_items as $slug => $label ) {
+            if ( isset( $items_by_slug[ $slug ] ) ) {
+                $matched_items[ $slug ] = $label;
+            }
+        }
+
+        if ( empty( $matched_items ) ) {
+            continue;
+        }
+
+        // Header grup (divider separator)
+        $header_slug = '#qrg-grp-' . sanitize_title( $group_title );
+        $new_submenus[] = [
+            '<span class="qrg-menu-group-header">' . esc_html( $group_title ) . '</span>',
+            'manage_options',
+            $header_slug,
+        ];
+
+        // Masukkan submenu di dalam grup
+        foreach ( $matched_items as $slug => $preferred_label ) {
+            $item = $items_by_slug[ $slug ];
+            if ( ! empty( $preferred_label ) ) {
+                $item[0] = $preferred_label;
+            }
+            $new_submenus[] = $item;
+            $used_slugs[ $slug ] = true;
+        }
     }
-    
+
+    // 3. Masukkan item yang belum terkategori (jika ada)
+    foreach ( $items_by_slug as $slug => $item ) {
+        if ( ! isset( $used_slugs[ $slug ] ) ) {
+            $new_submenus[] = $item;
+        }
+    }
+
     $submenu['master-data-plugin'] = $new_submenus;
+}
+
+// Styling khusus pemisah grup menu sidebar
+add_action( 'admin_head', 'qrg_admin_sidebar_menu_styling' );
+function qrg_admin_sidebar_menu_styling() {
+    ?>
+    <style>
+    /* Styling Header Pengelompokan Submenu Sekolah */
+    #adminmenu .wp-submenu a[href^="#qrg-grp-"],
+    #adminmenu li.wp-has-current-submenu .wp-submenu a[href^="#qrg-grp-"] {
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.8px !important;
+        color: #72aee6 !important;
+        background: #182026 !important;
+        border-top: 1px solid #3c434a !important;
+        border-bottom: 1px solid #23282d !important;
+        padding: 7px 12px 5px 12px !important;
+        margin-top: 6px !important;
+        margin-bottom: 2px !important;
+        line-height: 1.4 !important;
+        cursor: default !important;
+        pointer-events: none !important;
+        user-select: none !important;
+        display: block !important;
+    }
+    #adminmenu .wp-submenu a[href^="#qrg-grp-"]:hover {
+        color: #72aee6 !important;
+        background: #182026 !important;
+    }
+    #adminmenu .wp-submenu li:has(a[href^="#qrg-grp-"]) {
+        margin-top: 3px !important;
+    }
+    </style>
+    <?php
 }
 
 // Tampilan Halaman Utama Dashboard Master

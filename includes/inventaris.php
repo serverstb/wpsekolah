@@ -22,7 +22,7 @@ function qrg_register_inventaris_cpt() {
         ],
         'public'       => true,
         'show_ui'      => true,
-        'show_in_menu' => false, // Akses via tombol di Data Ruangan
+        'show_in_menu' => 'master-data-plugin', // Dikelompokkan ke menu Sarana & Prasarana
         'supports'     => [ 'title', 'thumbnail' ],
         'has_archive'  => false,
         'rewrite'      => false,
@@ -44,7 +44,7 @@ add_filter( 'submenu_file', 'qrg_inventaris_submenu_file' );
 function qrg_inventaris_submenu_file( $submenu_file ) {
     $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
     if ( $screen && $screen->post_type === 'master_inventaris' ) {
-        return 'edit.php?post_type=master_ruangan';
+        return 'edit.php?post_type=master_inventaris';
     }
     return $submenu_file;
 }
@@ -76,10 +76,9 @@ function qrg_inventaris_header_buttons() {
     <?php
 }
 
-// Sembunyikan submenu inventaris jika masih muncul
+// Sembunyikan hanya post-new submenu inventaris
 add_action( 'admin_menu', 'qrg_hide_inventaris_submenu', 999 );
 function qrg_hide_inventaris_submenu() {
-    remove_submenu_page( 'master-data-plugin', 'edit.php?post_type=master_inventaris' );
     remove_submenu_page( 'master-data-plugin', 'post-new.php?post_type=master_inventaris' );
 }
 
